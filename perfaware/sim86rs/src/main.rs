@@ -117,42 +117,50 @@ fn decode_move_register_memory_to_from_register(byte: u8, iterator: &mut std::sl
             // b = reg_field_encoding.to_string();
         }
         _ => {
-            debug!("    Mod: {}", mod_field);
             let rm_field_encoding = RM_FIELD_ENCODING.get(&rm_field).unwrap();
             debug!("    R/M encoding: {}", rm_field_encoding);
             let mut a = "".to_string();
             let mut b = "".to_string();
             match mod_field {
                 0b00 => {
-                    // info!("MOV {}, [{}]", reg_field_encoding, rm_field_encoding);
                     a = reg_field_encoding.to_string();
-                    b = format!("[{}]", rm_field_encoding);
+                    if rm_field_encoding.eq(&"BP") {
+                        let data1 = iterator.next().unwrap();
+                        if w_field == 1 {
+                            let data2 = iterator.next().unwrap();
+                            let data3 = (*data2 as u16) << 8 | *data1 as u16;
+                            b = format!("[{}]", data3);
+                        } else {
+                            b = format!("[{}]", data1);
+                        }
+                    } else {
+                        b = format!("[{}]", rm_field_encoding);
+                    }
                 }
                 0b01 => {
                     let data1 = iterator.next().unwrap();
-                    // if data1 > 0b0000_0000 {
-
-                    // info!(
-                    //     "MOV {}, [{} + {}]",
-                    //     reg_field_encoding, rm_field_encoding, data1
-                    // );
+                    debug!("    Data1: {:08b}", data1);
+                    if w_field == 1 && rm_field_encoding.ne(&"BP") {
+                        let final_data1 = !data1 + 0b1;
+                        debug!("    Final data1: {:08b}", final_data1);
+                        b = format!("[{} - {}]", rm_field_encoding, final_data1);
+                    } else {
+                        b = format!("[{} + {}]", rm_field_encoding, data1);
+                    }
                     a = reg_field_encoding.to_string();
-                    b = format!("[{} + {}]", rm_field_encoding, data1);
-
-                    // } else {
-                    //     info!("MOV {}, [{}]", reg_field_encoding, rm_field_encoding);
-                    // }
                 }
                 0b10 => {
                     let data1 = iterator.next().unwrap();
                     let data2 = iterator.next().unwrap();
                     let data3 = (*data2 as u16) << 8 | *data1 as u16;
-                    // info!(
-                    //     "MOV {}, [{} + {}]",
-                    //     reg_field_encoding, rm_field_encoding, data3
-                    // );
                     a = reg_field_encoding.to_string();
-                    b = format!("[{} + {}]", rm_field_encoding, data3);
+                    if w_field == 1 {
+                        let final_data3 = !data3 + 0b1;
+                        debug!("    Final data3: {:08b}", final_data3);
+                        b = format!("[{} - {}]", rm_field_encoding, final_data3);
+                    } else {
+                        b = format!("[{} + {}]", rm_field_encoding, data3);
+                    }
                 }
                 _ => {
                     panic!("Invalid mod field");
@@ -192,6 +200,120 @@ fn decode_move_immediate_to_register(byte: u8, iterator: &mut std::slice::Iter<u
         info!("MOV {}, {}", reg_field_encoding, data3);
     } else {
         info!("MOV {}, {}", reg_field_encoding, data1);
+    }
+}
+
+fn decode_move_immediate_to_register_memory(byte: u8, iterator: &mut std::slice::Iter<u8>) {
+    debug!("  MOV: Immediate to register/memory");
+
+    const W_MASK: u8 = 0b0000_0001;
+    let w_field = byte & W_MASK;
+    debug!("    W: {:01b}", w_field);
+
+    let next_byte = iterator.next().unwrap();
+    debug!("  Next byte: {:08b}", next_byte);
+
+    const MOD_MASK: u8 = 0b1100_0000;
+    const RM_MASK: u8 = 0b0000_0111;
+    let mod_field = (next_byte & MOD_MASK) >> 6;
+    let rm_field = next_byte & RM_MASK;
+
+    debug!("    Mod: {:02b}", mod_field);
+    debug!("    R/M: {:03b}", rm_field);
+
+    match mod_field {
+        0b11 => {}
+        _ => {
+            let rm_field_encoding = RM_FIELD_ENCODING.get(&rm_field).unwrap();
+            debug!("    R/M encoding: {}", rm_field_encoding);
+            match mod_field {
+                0b00 => {
+                    let data1 = iterator.next().unwrap();
+                    debug!("    Data1: {:08b}", data1);
+                    if w_field == 1 {
+                        let data2 = iterator.next().unwrap();
+                        let data3 = (*data2 as u16) << 8 | *data1 as u16;
+                        info!("MOV [{}], word {}", rm_field_encoding, data3);
+                    } else {
+                        info!("MOV [{}], byte {}", rm_field_encoding, data1);
+                    }
+                }
+                0b01 => {
+                    let disp_lo = iterator.next().unwrap();
+                    debug!("    disp_lo: {:08b}", disp_lo);
+                    let data1 = iterator.next().unwrap();
+                    if w_field == 1 {
+                        let data2 = iterator.next().unwrap();
+                        let data3 = (*data2 as u16) << 8 | *data1 as u16;
+                        info!("MOV [{} + {}], word {}", rm_field_encoding, disp_lo, data3);
+                    } else {
+                        info!("MOV [{} + {}], word {}", rm_field_encoding, disp_lo, data1);
+                    }
+                }
+                0b10 => {
+                    let disp_lo = iterator.next().unwrap();
+                    debug!("    disp_lo: {:08b}", disp_lo);
+                    let disp_hi = iterator.next().unwrap();
+                    debug!("    disp_hi: {:08b}", disp_hi);
+                    let disp = (*disp_hi as u16) << 8 | *disp_lo as u16;
+                    debug!("    disp: {:016b}", disp);
+                    let data1 = iterator.next().unwrap();
+                    debug!("    data1: {:08b}", data1);
+                    if w_field == 1 {
+                        let data2 = iterator.next().unwrap();
+                        let data3 = (*data2 as u16) << 8 | *data1 as u16;
+                        info!("MOV [{} + {}], word {}", rm_field_encoding, disp, data3);
+                    } else {
+                        info!("MOV [{} + {}], byte {}", rm_field_encoding, disp, data1);
+                    }
+                }
+                _ => {
+                    panic!("Invalid mod field");
+                }
+            }
+        }
+    }
+}
+
+fn decode_move_memory_to_accumulator(byte: u8, iterator: &mut std::slice::Iter<u8>) {
+    debug!("  MOV: Memory to accumulator");
+
+    const W_MASK: u8 = 0b0000_0001;
+    let w_field = byte & W_MASK;
+    debug!("    W: {:01b}", w_field);
+
+    let addr_lo = iterator.next().unwrap();
+    debug!("  addr_lo: {:08b}", addr_lo);
+
+    if w_field == 1 {
+        let addr_hi = iterator.next().unwrap();
+        debug!("  addr_hi: {:08b}", addr_hi);
+        let addr = (*addr_hi as u16) << 8 | *addr_lo as u16;
+        debug!("  addr: {:016b}", addr);
+        info!("MOV AX, [{}]", addr);
+    } else {
+        info!("MOV AX, [{}]", addr_lo);
+    }
+}
+
+fn decode_move_accumulator_to_memory(byte: u8, iterator: &mut std::slice::Iter<u8>) {
+    debug!("  MOV: Accumulator to memory");
+
+    const W_MASK: u8 = 0b0000_0001;
+    let w_field = byte & W_MASK;
+    debug!("    W: {:01b}", w_field);
+
+    let addr_lo = iterator.next().unwrap();
+    debug!("  addr_lo: {:08b}", addr_lo);
+
+    if w_field == 1 {
+        let addr_hi = iterator.next().unwrap();
+        debug!("  addr_hi: {:08b}", addr_hi);
+        let addr = (*addr_hi as u16) << 8 | *addr_lo as u16;
+        debug!("  addr: {:016b}", addr);
+        info!("MOV [{}], AX", addr);
+    } else {
+        info!("MOV [{}], AX", addr_lo);
     }
 }
 
@@ -244,6 +366,12 @@ fn main() {
     const MOV_REG_MEM_TO_FRO_REG_OPCODE: u8 = 0b1000_1000;
     const MOV_IMM_TO_REG_MASK: u8 = 0b1111_0000;
     const MOV_IMM_TO_REG_OPCODE: u8 = 0b1011_0000;
+    const MOV_IMM_TO_REG_MEM_MASK: u8 = 0b1111_1110;
+    const MOV_IMM_TO_REG_MEM_OPCODE: u8 = 0b1100_0110;
+    const MOV_MEM_TO_ACC_MASK: u8 = 0b1111_1110;
+    const MOV_MEM_TO_ACC_OPCODE: u8 = 0b1010_0000;
+    const MOV_ACC_TO_MEM_MASK: u8 = 0b1111_1110;
+    const MOV_ACC_TO_MEM_OPCODE: u8 = 0b1010_0010;
 
     while let Some(byte) = iterator.next() {
         debug!("Byte: {:08b}", byte);
@@ -253,6 +381,15 @@ fn main() {
             }
             byte if (byte & MOV_IMM_TO_REG_MASK) == MOV_IMM_TO_REG_OPCODE => {
                 decode_move_immediate_to_register(*byte, &mut iterator)
+            }
+            byte if (byte & MOV_IMM_TO_REG_MEM_MASK) == MOV_IMM_TO_REG_MEM_OPCODE => {
+                decode_move_immediate_to_register_memory(*byte, &mut iterator)
+            }
+            byte if (byte & MOV_MEM_TO_ACC_MASK) == MOV_MEM_TO_ACC_OPCODE => {
+                decode_move_memory_to_accumulator(*byte, &mut iterator)
+            }
+            byte if (byte & MOV_ACC_TO_MEM_MASK) == MOV_ACC_TO_MEM_OPCODE => {
+                decode_move_accumulator_to_memory(*byte, &mut iterator)
             }
             _ => {}
         }
