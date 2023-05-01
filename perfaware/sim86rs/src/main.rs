@@ -7,7 +7,7 @@ use std::io::BufReader;
 
 use env_logger::{Builder, Target};
 use lazy_static::lazy_static;
-use log::{debug, error, info, trace, warn, LevelFilter};
+use log::{debug, error, info, trace, warn, Level, LevelFilter};
 
 lazy_static! {
     static ref REG_FIELD_ENCODING: HashMap<u8, HashMap<u8, &'static str>> = {
@@ -76,6 +76,27 @@ lazy_static! {
     };
 }
 
+const MASK_FOUR_BIT: u8 = 0b1111_0000;
+const MASK_SEVEN_BIT: u8 = 0b1111_1110;
+const MASK_SIX_BIT: u8 = 0b1111_1100;
+
+const MOV_ACC_TO_MEM_OPCODE: u8 = 0b1010_0010;
+const MOV_IMM_TO_REG_MEM_OPCODE: u8 = 0b1100_0110;
+const MOV_IMM_TO_REG_OPCODE: u8 = 0b1011_0000;
+const MOV_MEM_TO_ACC_OPCODE: u8 = 0b1010_0000;
+const MOV_REG_MEM_TO_FRO_REG_OPCODE: u8 = 0b1000_1000;
+
+fn read_next_byte_and_combine(word: u16, iterator: &mut std::slice::Iter<u8>) -> u16 {
+    let byte = iterator.next().unwrap();
+    return (*byte as u16) << 8 | word;
+}
+
+fn read_next_word(iterator: &mut std::slice::Iter<u8>) -> u16 {
+    let lo = iterator.next().unwrap();
+    let hi = iterator.next().unwrap();
+    return (*hi as u16) << 8 | *lo as u16;
+}
+
 fn decode_move_register_memory_to_from_register(byte: u8, iterator: &mut std::slice::Iter<u8>) {
     debug!("  MOV: Register/memory to/from register");
 
@@ -106,100 +127,56 @@ fn decode_move_register_memory_to_from_register(byte: u8, iterator: &mut std::sl
     let reg_field_encoding = reg_field_map.get(&w_field).unwrap();
     debug!("    Reg encoding: {}", reg_field_encoding);
 
-    match mod_field {
-        0b11 => {
-            let rm_field_map = REG_FIELD_ENCODING.get(&rm_field).unwrap();
-            let rm_field_encoding = rm_field_map.get(&w_field).unwrap();
-            debug!("    R/M encoding: {}", rm_field_encoding);
-            info!("MOV {}, {}", rm_field_encoding, reg_field_encoding);
+    let rm_field_map = REG_FIELD_ENCODING.get(&rm_field).unwrap();
+    let mut rm_field_encoding = RM_FIELD_ENCODING.get(&rm_field).unwrap();
+    debug!("    R/M encoding: {}", rm_field_encoding);
 
-            // a = rm_field_encoding.to_string();
-            // b = reg_field_encoding.to_string();
+    let a = reg_field_encoding.to_string();
+    let mut b = "".to_string();
+
+    match mod_field {
+        0b00 => {
+            if rm_field_encoding.eq(&"BP") {
+                let mut data = *iterator.next().unwrap() as u16;
+                if w_field == 0b1 {
+                    data = read_next_byte_and_combine(data, iterator);
+                }
+                b = format!("[{}]", data);
+            } else {
+                b = format!("[{}]", rm_field_encoding);
+            }
+        }
+        0b01 => {
+            let mut data = *iterator.next().unwrap();
+            if w_field == 0b1 && rm_field_encoding.ne(&"BP") {
+                data = !data + 0b1;
+                b = format!("[{} - {}]", rm_field_encoding, data);
+            } else {
+                b = format!("[{} + {}]", rm_field_encoding, data);
+            }
+        }
+        0b10 => {
+            let mut data = read_next_word(iterator);
+            if w_field == 0b1 {
+                data = !data + 0b1;
+                b = format!("[{} - {}]", rm_field_encoding, data);
+            } else {
+                b = format!("[{} + {}]", rm_field_encoding, data);
+            }
+        }
+        0b11 => {
+            rm_field_encoding = rm_field_map.get(&w_field).unwrap();
+            debug!("    R/M encoding: {}", rm_field_encoding);
+            b = rm_field_encoding.to_string();
         }
         _ => {
-            let rm_field_encoding = RM_FIELD_ENCODING.get(&rm_field).unwrap();
-            debug!("    R/M encoding: {}", rm_field_encoding);
-            let mut a = "".to_string();
-            let mut b = "".to_string();
-            match mod_field {
-                0b00 => {
-                    a = reg_field_encoding.to_string();
-                    if rm_field_encoding.eq(&"BP") {
-                        let data1 = iterator.next().unwrap();
-                        if w_field == 1 {
-                            let data2 = iterator.next().unwrap();
-                            let data3 = (*data2 as u16) << 8 | *data1 as u16;
-                            b = format!("[{}]", data3);
-                        } else {
-                            b = format!("[{}]", data1);
-                        }
-                    } else {
-                        b = format!("[{}]", rm_field_encoding);
-                    }
-                }
-                0b01 => {
-                    let data1 = iterator.next().unwrap();
-                    debug!("    Data1: {:08b}", data1);
-                    if w_field == 1 && rm_field_encoding.ne(&"BP") {
-                        let final_data1 = !data1 + 0b1;
-                        debug!("    Final data1: {:08b}", final_data1);
-                        b = format!("[{} - {}]", rm_field_encoding, final_data1);
-                    } else {
-                        b = format!("[{} + {}]", rm_field_encoding, data1);
-                    }
-                    a = reg_field_encoding.to_string();
-                }
-                0b10 => {
-                    let data1 = iterator.next().unwrap();
-                    let data2 = iterator.next().unwrap();
-                    let data3 = (*data2 as u16) << 8 | *data1 as u16;
-                    a = reg_field_encoding.to_string();
-                    if w_field == 1 {
-                        let final_data3 = !data3 + 0b1;
-                        debug!("    Final data3: {:08b}", final_data3);
-                        b = format!("[{} - {}]", rm_field_encoding, final_data3);
-                    } else {
-                        b = format!("[{} + {}]", rm_field_encoding, data3);
-                    }
-                }
-                _ => {
-                    panic!("Invalid mod field");
-                }
-            }
-            if d_field == 1 {
-                info!("MOV {}, {}", a, b);
-            } else {
-                info!("MOV {}, {}", b, a);
-            }
+            panic!("Invalid mod field: {}", mod_field);
         }
     }
-}
-
-fn decode_move_immediate_to_register(byte: u8, iterator: &mut std::slice::Iter<u8>) {
-    debug!("  MOV: Immediate to register");
-
-    const W_MASK: u8 = 0b0000_1000;
-    const REG_MASK: u8 = 0b0000_0111;
-
-    let w_field = (byte & W_MASK) >> 3;
-    let reg_field = byte & REG_MASK;
-    debug!("    W: {:01b}", w_field);
-    debug!("    Reg: {:03b}", reg_field);
-
-    let reg_field_map = REG_FIELD_ENCODING.get(&reg_field).unwrap();
-    let reg_field_encoding = reg_field_map.get(&w_field).unwrap();
-    debug!("    Reg encoding: {}", reg_field_encoding);
-
-    let data1 = iterator.next().unwrap();
-    debug!("  data1: {:08b}", data1);
-
-    if w_field == 0b1 {
-        let data2 = iterator.next().unwrap();
-        debug!("  data2: {:08b}", data2);
-        let data3 = ((*data2 as u16) << 8) | *data1 as u16;
-        info!("MOV {}, {}", reg_field_encoding, data3);
+    if d_field == 0b1 {
+        info!("MOV {}, {}", a, b);
     } else {
-        info!("MOV {}, {}", reg_field_encoding, data1);
+        info!("MOV {}, {}", b, a);
     }
 }
 
@@ -221,109 +198,107 @@ fn decode_move_immediate_to_register_memory(byte: u8, iterator: &mut std::slice:
     debug!("    Mod: {:02b}", mod_field);
     debug!("    R/M: {:03b}", rm_field);
 
+    let rm_field_encoding = RM_FIELD_ENCODING.get(&rm_field).unwrap();
+    debug!("    R/M encoding: {}", rm_field_encoding);
+
     match mod_field {
-        0b11 => {}
-        _ => {
-            let rm_field_encoding = RM_FIELD_ENCODING.get(&rm_field).unwrap();
-            debug!("    R/M encoding: {}", rm_field_encoding);
-            match mod_field {
-                0b00 => {
-                    let data1 = iterator.next().unwrap();
-                    debug!("    Data1: {:08b}", data1);
-                    if w_field == 1 {
-                        let data2 = iterator.next().unwrap();
-                        let data3 = (*data2 as u16) << 8 | *data1 as u16;
-                        info!("MOV [{}], word {}", rm_field_encoding, data3);
-                    } else {
-                        info!("MOV [{}], byte {}", rm_field_encoding, data1);
-                    }
-                }
-                0b01 => {
-                    let disp_lo = iterator.next().unwrap();
-                    debug!("    disp_lo: {:08b}", disp_lo);
-                    let data1 = iterator.next().unwrap();
-                    if w_field == 1 {
-                        let data2 = iterator.next().unwrap();
-                        let data3 = (*data2 as u16) << 8 | *data1 as u16;
-                        info!("MOV [{} + {}], word {}", rm_field_encoding, disp_lo, data3);
-                    } else {
-                        info!("MOV [{} + {}], word {}", rm_field_encoding, disp_lo, data1);
-                    }
-                }
-                0b10 => {
-                    let disp_lo = iterator.next().unwrap();
-                    debug!("    disp_lo: {:08b}", disp_lo);
-                    let disp_hi = iterator.next().unwrap();
-                    debug!("    disp_hi: {:08b}", disp_hi);
-                    let disp = (*disp_hi as u16) << 8 | *disp_lo as u16;
-                    debug!("    disp: {:016b}", disp);
-                    let data1 = iterator.next().unwrap();
-                    debug!("    data1: {:08b}", data1);
-                    if w_field == 1 {
-                        let data2 = iterator.next().unwrap();
-                        let data3 = (*data2 as u16) << 8 | *data1 as u16;
-                        info!("MOV [{} + {}], word {}", rm_field_encoding, disp, data3);
-                    } else {
-                        info!("MOV [{} + {}], byte {}", rm_field_encoding, disp, data1);
-                    }
-                }
-                _ => {
-                    panic!("Invalid mod field");
-                }
+        0b00 => {
+            let mut data = *iterator.next().unwrap() as u16;
+            debug!("    Data1: {:08b}", data);
+            if w_field == 0b1 {
+                data = read_next_byte_and_combine(data, iterator);
             }
+            info!("MOV [{}], byte {}", rm_field_encoding, data);
+        }
+        0b01 => {
+            let disp_lo = iterator.next().unwrap();
+            debug!("    disp_lo: {:08b}", disp_lo);
+            let mut data = *iterator.next().unwrap() as u16;
+            debug!("    Data1: {:08b}", data);
+            if w_field == 0b1 {
+                data = read_next_byte_and_combine(data, iterator);
+            }
+            info!("MOV [{} + {}], word {}", rm_field_encoding, disp_lo, data);
+        }
+        0b10 => {
+            let disp = read_next_word(iterator);
+            debug!("    disp: {:016b}", disp);
+            let mut data = *iterator.next().unwrap() as u16;
+            debug!("    Data1: {:08b}", data);
+            if w_field == 0b1 {
+                data = read_next_byte_and_combine(data, iterator);
+                info!("MOV [{} + {}], word {}", rm_field_encoding, disp, data);
+            } else {
+                info!("MOV [{} + {}], byte {}", rm_field_encoding, disp, data);
+            }
+        }
+        _ => {
+            panic!("Invalid mod field: {}", mod_field);
         }
     }
 }
 
-fn decode_move_memory_to_accumulator(byte: u8, iterator: &mut std::slice::Iter<u8>) {
-    debug!("  MOV: Memory to accumulator");
+fn decode_move_immediate_to_register(byte: u8, iterator: &mut std::slice::Iter<u8>) {
+    debug!("  MOV: Immediate to register");
 
-    const W_MASK: u8 = 0b0000_0001;
-    let w_field = byte & W_MASK;
+    const W_MASK: u8 = 0b0000_1000;
+    const REG_MASK: u8 = 0b0000_0111;
+
+    let w_field = (byte & W_MASK) >> 3;
+    let reg_field = byte & REG_MASK;
     debug!("    W: {:01b}", w_field);
+    debug!("    Reg: {:03b}", reg_field);
 
-    let addr_lo = iterator.next().unwrap();
-    debug!("  addr_lo: {:08b}", addr_lo);
+    let reg_field_map = REG_FIELD_ENCODING.get(&reg_field).unwrap();
+    let reg_field_encoding = reg_field_map.get(&w_field).unwrap();
+    debug!("    Reg encoding: {}", reg_field_encoding);
 
-    if w_field == 1 {
-        let addr_hi = iterator.next().unwrap();
-        debug!("  addr_hi: {:08b}", addr_hi);
-        let addr = (*addr_hi as u16) << 8 | *addr_lo as u16;
-        debug!("  addr: {:016b}", addr);
-        info!("MOV AX, [{}]", addr);
-    } else {
-        info!("MOV AX, [{}]", addr_lo);
+    let mut data = *iterator.next().unwrap() as u16;
+    debug!("  data1: {:08b}", data);
+
+    if w_field == 0b1 {
+        data = read_next_byte_and_combine(data, iterator);
     }
+    info!("MOV {}, {}", reg_field_encoding, data);
 }
 
-fn decode_move_accumulator_to_memory(byte: u8, iterator: &mut std::slice::Iter<u8>) {
-    debug!("  MOV: Accumulator to memory");
+fn decode_move_memory_to_fro_accumulator(
+    byte: u8,
+    iterator: &mut std::slice::Iter<u8>,
+    reverse: bool,
+) {
+    debug!("  MOV: Memory to/fro accumulator");
 
     const W_MASK: u8 = 0b0000_0001;
     let w_field = byte & W_MASK;
     debug!("    W: {:01b}", w_field);
 
-    let addr_lo = iterator.next().unwrap();
-    debug!("  addr_lo: {:08b}", addr_lo);
+    let mut addr = *iterator.next().unwrap() as u16;
+    debug!("  addr_lo: {:08b}", addr);
 
-    if w_field == 1 {
-        let addr_hi = iterator.next().unwrap();
-        debug!("  addr_hi: {:08b}", addr_hi);
-        let addr = (*addr_hi as u16) << 8 | *addr_lo as u16;
-        debug!("  addr: {:016b}", addr);
+    if w_field == 0b1 {
+        addr = read_next_byte_and_combine(addr, iterator);
+    }
+    debug!("  addr: {:016b}", addr);
+    if reverse {
         info!("MOV [{}], AX", addr);
     } else {
-        info!("MOV [{}], AX", addr_lo);
+        info!("MOV AX, [{}]", addr);
     }
 }
 
 fn main() {
     Builder::new()
         .target(Target::Stdout) // Output all logs to stdout
-        // .filter_level(LevelFilter::Debug) // Set the minimum log level to Info
-        // .format(|buf, record| writeln!(buf, "[{}\t] {}", record.level(), record.args())) // Custom message format
-        .filter_level(LevelFilter::Info) // Set the minimum log level to Info
-        .format(|buf, record| writeln!(buf, "{}", record.args())) // Custom message format
+        .filter_level(LevelFilter::Debug) // Set the minimum log level to Info
+        .format(|buf, record| match record.level() {
+            Level::Info => {
+                writeln!(buf, "{}", record.args())
+            }
+            _ => {
+                writeln!(buf, "; [{}] {}", record.level(), record.args())
+            }
+        }) // Custom message format
         .init();
 
     // Get command line arguments
@@ -362,34 +337,23 @@ fn main() {
 
     let mut iterator = buffer.iter();
 
-    const MOV_REG_MEM_TO_FRO_REG_MASK: u8 = 0b1111_1100;
-    const MOV_REG_MEM_TO_FRO_REG_OPCODE: u8 = 0b1000_1000;
-    const MOV_IMM_TO_REG_MASK: u8 = 0b1111_0000;
-    const MOV_IMM_TO_REG_OPCODE: u8 = 0b1011_0000;
-    const MOV_IMM_TO_REG_MEM_MASK: u8 = 0b1111_1110;
-    const MOV_IMM_TO_REG_MEM_OPCODE: u8 = 0b1100_0110;
-    const MOV_MEM_TO_ACC_MASK: u8 = 0b1111_1110;
-    const MOV_MEM_TO_ACC_OPCODE: u8 = 0b1010_0000;
-    const MOV_ACC_TO_MEM_MASK: u8 = 0b1111_1110;
-    const MOV_ACC_TO_MEM_OPCODE: u8 = 0b1010_0010;
-
     while let Some(byte) = iterator.next() {
         debug!("Byte: {:08b}", byte);
         match byte {
-            byte if (byte & MOV_REG_MEM_TO_FRO_REG_MASK) == MOV_REG_MEM_TO_FRO_REG_OPCODE => {
+            byte if (byte & MASK_SIX_BIT) == MOV_REG_MEM_TO_FRO_REG_OPCODE => {
                 decode_move_register_memory_to_from_register(*byte, &mut iterator)
             }
-            byte if (byte & MOV_IMM_TO_REG_MASK) == MOV_IMM_TO_REG_OPCODE => {
-                decode_move_immediate_to_register(*byte, &mut iterator)
-            }
-            byte if (byte & MOV_IMM_TO_REG_MEM_MASK) == MOV_IMM_TO_REG_MEM_OPCODE => {
+            byte if (byte & MASK_SEVEN_BIT) == MOV_IMM_TO_REG_MEM_OPCODE => {
                 decode_move_immediate_to_register_memory(*byte, &mut iterator)
             }
-            byte if (byte & MOV_MEM_TO_ACC_MASK) == MOV_MEM_TO_ACC_OPCODE => {
-                decode_move_memory_to_accumulator(*byte, &mut iterator)
+            byte if (byte & MASK_FOUR_BIT) == MOV_IMM_TO_REG_OPCODE => {
+                decode_move_immediate_to_register(*byte, &mut iterator)
             }
-            byte if (byte & MOV_ACC_TO_MEM_MASK) == MOV_ACC_TO_MEM_OPCODE => {
-                decode_move_accumulator_to_memory(*byte, &mut iterator)
+            byte if (byte & MASK_SEVEN_BIT) == MOV_MEM_TO_ACC_OPCODE => {
+                decode_move_memory_to_fro_accumulator(*byte, &mut iterator, false)
+            }
+            byte if (byte & MASK_SEVEN_BIT) == MOV_ACC_TO_MEM_OPCODE => {
+                decode_move_memory_to_fro_accumulator(*byte, &mut iterator, true)
             }
             _ => {}
         }
