@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::env;
 use std::fmt::format;
 use std::fs::File;
@@ -9,283 +8,55 @@ use env_logger::{Builder, Target};
 use lazy_static::lazy_static;
 use log::{debug, error, info, trace, warn, Level, LevelFilter};
 
-lazy_static! {
-    static ref REG_FIELD_ENCODING: HashMap<u8, HashMap<u8, &'static str>> = {
-        let mut map = HashMap::new();
-        map.insert(0b000, {
-            let mut map = HashMap::new();
-            map.insert(0b0, "AL");
-            map.insert(0b1, "AX");
-            map
-        });
-        map.insert(0b001, {
-            let mut map = HashMap::new();
-            map.insert(0b0, "CL");
-            map.insert(0b1, "CX");
-            map
-        });
-        map.insert(0b010, {
-            let mut map = HashMap::new();
-            map.insert(0b0, "DL");
-            map.insert(0b1, "DX");
-            map
-        });
-        map.insert(0b011, {
-            let mut map = HashMap::new();
-            map.insert(0b0, "BL");
-            map.insert(0b1, "BX");
-            map
-        });
-        map.insert(0b100, {
-            let mut map = HashMap::new();
-            map.insert(0b0, "AH");
-            map.insert(0b1, "SP");
-            map
-        });
-        map.insert(0b101, {
-            let mut map = HashMap::new();
-            map.insert(0b0, "CH");
-            map.insert(0b1, "BP");
-            map
-        });
-        map.insert(0b110, {
-            let mut map = HashMap::new();
-            map.insert(0b0, "DH");
-            map.insert(0b1, "SI");
-            map
-        });
-        map.insert(0b111, {
-            let mut map = HashMap::new();
-            map.insert(0b0, "BH");
-            map.insert(0b1, "DI");
-            map
-        });
-        map
-    };
-    static ref RM_FIELD_ENCODING: HashMap<u8, &'static str> = {
-        let mut map = HashMap::new();
-        map.insert(0b000, "BX + SI");
-        map.insert(0b001, "BX + DI");
-        map.insert(0b010, "BP + SI");
-        map.insert(0b011, "BP + DI");
-        map.insert(0b100, "SI");
-        map.insert(0b101, "DI");
-        map.insert(0b110, "BP");
-        map.insert(0b111, "BX");
-        map
-    };
-}
+mod decoders;
+use decoders::*;
 
-const MASK_FOUR_BIT: u8 = 0b1111_0000;
-const MASK_SEVEN_BIT: u8 = 0b1111_1110;
-const MASK_SIX_BIT: u8 = 0b1111_1100;
+const MASK_FOUR_BITS: u8 = 0b1111_0000;
+const MASK_FIVE_BITS: u8 = 0b1111_1000;
+const MASK_SIX_BITS: u8 = 0b1111_1100;
+const MASK_SEVEN_BITS: u8 = 0b1111_1110;
+const MASK_MIDDLE_TWO_BITS: u8 = 0b1110_0111;
 
 const MOV_ACC_TO_MEM_OPCODE: u8 = 0b1010_0010;
 const MOV_IMM_TO_REG_MEM_OPCODE: u8 = 0b1100_0110;
 const MOV_IMM_TO_REG_OPCODE: u8 = 0b1011_0000;
 const MOV_MEM_TO_ACC_OPCODE: u8 = 0b1010_0000;
 const MOV_REG_MEM_TO_FRO_REG_OPCODE: u8 = 0b1000_1000;
-
-fn read_next_byte_and_combine(word: u16, iterator: &mut std::slice::Iter<u8>) -> u16 {
-    let byte = iterator.next().unwrap();
-    return (*byte as u16) << 8 | word;
-}
-
-fn read_next_word(iterator: &mut std::slice::Iter<u8>) -> u16 {
-    let lo = iterator.next().unwrap();
-    let hi = iterator.next().unwrap();
-    return (*hi as u16) << 8 | *lo as u16;
-}
-
-fn decode_move_register_memory_to_from_register(byte: u8, iterator: &mut std::slice::Iter<u8>) {
-    debug!("  MOV: Register/memory to/from register");
-
-    const D_MASK: u8 = 0b0000_0010;
-    const W_MASK: u8 = 0b0000_0001;
-
-    let d_field = (byte & D_MASK) >> 1;
-    let w_field = byte & W_MASK;
-    debug!("    D: {:01b}", d_field);
-    debug!("    W: {:01b}", w_field);
-
-    let next_byte = iterator.next().unwrap();
-
-    debug!("  Next byte: {:08b}", next_byte);
-
-    const MOD_MASK: u8 = 0b1100_0000;
-    const REG_MASK: u8 = 0b0011_1000;
-    const RM_MASK: u8 = 0b0000_0111;
-
-    let mod_field = (next_byte & MOD_MASK) >> 6;
-    let reg_field = (next_byte & REG_MASK) >> 3;
-    let rm_field = next_byte & RM_MASK;
-    debug!("    Mod: {:02b}", mod_field);
-    debug!("    Reg: {:03b}", reg_field);
-    debug!("    R/M: {:03b}", rm_field);
-
-    let reg_field_map = REG_FIELD_ENCODING.get(&reg_field).unwrap();
-    let reg_field_encoding = reg_field_map.get(&w_field).unwrap();
-    debug!("    Reg encoding: {}", reg_field_encoding);
-
-    let rm_field_map = REG_FIELD_ENCODING.get(&rm_field).unwrap();
-    let mut rm_field_encoding = RM_FIELD_ENCODING.get(&rm_field).unwrap();
-    debug!("    R/M encoding: {}", rm_field_encoding);
-
-    let a = reg_field_encoding.to_string();
-    let mut b = "".to_string();
-
-    match mod_field {
-        0b00 => {
-            if rm_field_encoding.eq(&"BP") {
-                let mut data = *iterator.next().unwrap() as u16;
-                if w_field == 0b1 {
-                    data = read_next_byte_and_combine(data, iterator);
-                }
-                b = format!("[{}]", data);
-            } else {
-                b = format!("[{}]", rm_field_encoding);
-            }
-        }
-        0b01 => {
-            let mut data = *iterator.next().unwrap();
-            if w_field == 0b1 && rm_field_encoding.ne(&"BP") {
-                data = !data + 0b1;
-                b = format!("[{} - {}]", rm_field_encoding, data);
-            } else {
-                b = format!("[{} + {}]", rm_field_encoding, data);
-            }
-        }
-        0b10 => {
-            let mut data = read_next_word(iterator);
-            if w_field == 0b1 {
-                data = !data + 0b1;
-                b = format!("[{} - {}]", rm_field_encoding, data);
-            } else {
-                b = format!("[{} + {}]", rm_field_encoding, data);
-            }
-        }
-        0b11 => {
-            rm_field_encoding = rm_field_map.get(&w_field).unwrap();
-            debug!("    R/M encoding: {}", rm_field_encoding);
-            b = rm_field_encoding.to_string();
-        }
-        _ => {
-            panic!("Invalid mod field: {}", mod_field);
-        }
-    }
-    if d_field == 0b1 {
-        info!("MOV {}, {}", a, b);
-    } else {
-        info!("MOV {}, {}", b, a);
-    }
-}
-
-fn decode_move_immediate_to_register_memory(byte: u8, iterator: &mut std::slice::Iter<u8>) {
-    debug!("  MOV: Immediate to register/memory");
-
-    const W_MASK: u8 = 0b0000_0001;
-    let w_field = byte & W_MASK;
-    debug!("    W: {:01b}", w_field);
-
-    let next_byte = iterator.next().unwrap();
-    debug!("  Next byte: {:08b}", next_byte);
-
-    const MOD_MASK: u8 = 0b1100_0000;
-    const RM_MASK: u8 = 0b0000_0111;
-    let mod_field = (next_byte & MOD_MASK) >> 6;
-    let rm_field = next_byte & RM_MASK;
-
-    debug!("    Mod: {:02b}", mod_field);
-    debug!("    R/M: {:03b}", rm_field);
-
-    let rm_field_encoding = RM_FIELD_ENCODING.get(&rm_field).unwrap();
-    debug!("    R/M encoding: {}", rm_field_encoding);
-
-    match mod_field {
-        0b00 => {
-            let mut data = *iterator.next().unwrap() as u16;
-            debug!("    Data1: {:08b}", data);
-            if w_field == 0b1 {
-                data = read_next_byte_and_combine(data, iterator);
-            }
-            info!("MOV [{}], byte {}", rm_field_encoding, data);
-        }
-        0b01 => {
-            let disp_lo = iterator.next().unwrap();
-            debug!("    disp_lo: {:08b}", disp_lo);
-            let mut data = *iterator.next().unwrap() as u16;
-            debug!("    Data1: {:08b}", data);
-            if w_field == 0b1 {
-                data = read_next_byte_and_combine(data, iterator);
-            }
-            info!("MOV [{} + {}], word {}", rm_field_encoding, disp_lo, data);
-        }
-        0b10 => {
-            let disp = read_next_word(iterator);
-            debug!("    disp: {:016b}", disp);
-            let mut data = *iterator.next().unwrap() as u16;
-            debug!("    Data1: {:08b}", data);
-            if w_field == 0b1 {
-                data = read_next_byte_and_combine(data, iterator);
-                info!("MOV [{} + {}], word {}", rm_field_encoding, disp, data);
-            } else {
-                info!("MOV [{} + {}], byte {}", rm_field_encoding, disp, data);
-            }
-        }
-        _ => {
-            panic!("Invalid mod field: {}", mod_field);
-        }
-    }
-}
-
-fn decode_move_immediate_to_register(byte: u8, iterator: &mut std::slice::Iter<u8>) {
-    debug!("  MOV: Immediate to register");
-
-    const W_MASK: u8 = 0b0000_1000;
-    const REG_MASK: u8 = 0b0000_0111;
-
-    let w_field = (byte & W_MASK) >> 3;
-    let reg_field = byte & REG_MASK;
-    debug!("    W: {:01b}", w_field);
-    debug!("    Reg: {:03b}", reg_field);
-
-    let reg_field_map = REG_FIELD_ENCODING.get(&reg_field).unwrap();
-    let reg_field_encoding = reg_field_map.get(&w_field).unwrap();
-    debug!("    Reg encoding: {}", reg_field_encoding);
-
-    let mut data = *iterator.next().unwrap() as u16;
-    debug!("  data1: {:08b}", data);
-
-    if w_field == 0b1 {
-        data = read_next_byte_and_combine(data, iterator);
-    }
-    info!("MOV {}, {}", reg_field_encoding, data);
-}
-
-fn decode_move_memory_to_fro_accumulator(
-    byte: u8,
-    iterator: &mut std::slice::Iter<u8>,
-    reverse: bool,
-) {
-    debug!("  MOV: Memory to/fro accumulator");
-
-    const W_MASK: u8 = 0b0000_0001;
-    let w_field = byte & W_MASK;
-    debug!("    W: {:01b}", w_field);
-
-    let mut addr = *iterator.next().unwrap() as u16;
-    debug!("  addr_lo: {:08b}", addr);
-
-    if w_field == 0b1 {
-        addr = read_next_byte_and_combine(addr, iterator);
-    }
-    debug!("  addr: {:016b}", addr);
-    if reverse {
-        info!("MOV [{}], AX", addr);
-    } else {
-        info!("MOV AX, [{}]", addr);
-    }
-}
+const ADD_REG_MEM_WITH_REG_OPCODE: u8 = 0b0000_0000;
+const ADD_IMM_TO_REG_MEM_OPCODE: u8 = 0b1000_0000;
+const ADD_IMM_TO_ACC_OPCODE: u8 = 0b0000_0100;
+const SUB_REG_MEM_WITH_REG_OPCODE: u8 = 0b0010_1000;
+const SUB_IMM_FROM_ACC_OPCODE: u8 = 0b0010_1100;
+const CMP_REG_MEM_AND_REG_OPCODE: u8 = 0b0011_1000;
+const CMP_IMM_WITH_ACC_OPCODE: u8 = 0b0011_1100;
+const JNZ_OPCODE: u8 = 0b0111_0101;
+const JE_OPCODE: u8 = 0b0111_0100;
+const JL_OPCODE: u8 = 0b0111_1100;
+const JLE_OPCODE: u8 = 0b0111_1110;
+const JB_OPCODE: u8 = 0b0111_0010;
+const JBE_OPCODE: u8 = 0b0111_0110;
+const JP_OPCODE: u8 = 0b0111_1010;
+const JO_OPCODE: u8 = 0b0111_0000;
+const JS_OPCODE: u8 = 0b0111_1000;
+const JNE_OPCODE: u8 = 0b0111_0101;
+const JNL_OPCODE: u8 = 0b0111_1101;
+const JG_OPCODE: u8 = 0b0111_1111;
+const JNB_OPCODE: u8 = 0b0111_0011;
+const JA_OPCODE: u8 = 0b0111_0111;
+const JNP_OPCODE: u8 = 0b0111_1011;
+const JNO_OPCODE: u8 = 0b0111_0001;
+const JNS_OPCODE: u8 = 0b0111_1001;
+const LOOP_OPCODE: u8 = 0b1110_0010;
+const LOOPZ_OPCODE: u8 = 0b1110_0001;
+const LOOPNZ_OPCODE: u8 = 0b1110_0000;
+const JCXZ_OPCODE: u8 = 0b1110_0011;
+const PUSH_REG_MEM_OPCODE: u8 = 0b1111_1111;
+const PUSH_REG_OPCODE: u8 = 0b0101_0000;
+const PUSH_SEG_REG_OPCODE: u8 = 0b0000_0110;
+const POP_REG_MEM_OPCODE: u8 = 0b1000_1111;
+const POP_REG_OPCODE: u8 = 0b0101_1000;
+const POP_SEG_REG_OPCODE: u8 = 0b0000_0111;
+const XCHG_REG_MEM_WITH_REG_OPCODE: u8 = 0b1000_0110;
 
 fn main() {
     Builder::new()
@@ -319,16 +90,14 @@ fn main() {
             std::process::exit(1);
         }
     };
-    info!(";{}", file_path);
+    info!("; {}", file_path);
     info!("BITS 16");
 
     // Read the file contents into a byte buffer
     let mut buf_reader = BufReader::new(file);
     let mut buffer = Vec::new();
     match buf_reader.read_to_end(&mut buffer) {
-        Ok(_) => {
-            debug!("File contents (bytes): {:?}", buffer);
-        }
+        Ok(_) => {}
         Err(error) => {
             error!("Error reading file {}: {}", file_path, error);
             std::process::exit(1);
@@ -338,24 +107,85 @@ fn main() {
     let mut iterator = buffer.iter();
 
     while let Some(byte) = iterator.next() {
-        debug!("Byte: {:08b}", byte);
+        debug!("Byte: {:08b} {}", byte, byte);
         match byte {
-            byte if (byte & MASK_SIX_BIT) == MOV_REG_MEM_TO_FRO_REG_OPCODE => {
-                decode_move_register_memory_to_from_register(*byte, &mut iterator)
+            byte if (byte & MASK_SIX_BITS) == MOV_REG_MEM_TO_FRO_REG_OPCODE => {
+                decode_register_memory_to_from_register("MOV", *byte, &mut iterator)
             }
-            byte if (byte & MASK_SEVEN_BIT) == MOV_IMM_TO_REG_MEM_OPCODE => {
-                decode_move_immediate_to_register_memory(*byte, &mut iterator)
+            byte if (byte & MASK_SEVEN_BITS) == MOV_IMM_TO_REG_MEM_OPCODE => {
+                decode_immediate_to_register_memory("MOV", *byte, &mut iterator)
             }
-            byte if (byte & MASK_FOUR_BIT) == MOV_IMM_TO_REG_OPCODE => {
-                decode_move_immediate_to_register(*byte, &mut iterator)
+            byte if (byte & MASK_FOUR_BITS) == MOV_IMM_TO_REG_OPCODE => {
+                decode_immediate_to_register("MOV", *byte, &mut iterator)
             }
-            byte if (byte & MASK_SEVEN_BIT) == MOV_MEM_TO_ACC_OPCODE => {
-                decode_move_memory_to_fro_accumulator(*byte, &mut iterator, false)
+            byte if (byte & MASK_SEVEN_BITS) == MOV_MEM_TO_ACC_OPCODE => {
+                decode_memory_to_fro_accumulator("MOV", *byte, &mut iterator, false)
             }
-            byte if (byte & MASK_SEVEN_BIT) == MOV_ACC_TO_MEM_OPCODE => {
-                decode_move_memory_to_fro_accumulator(*byte, &mut iterator, true)
+            byte if (byte & MASK_SEVEN_BITS) == MOV_ACC_TO_MEM_OPCODE => {
+                decode_memory_to_fro_accumulator("MOV", *byte, &mut iterator, true)
             }
-            _ => {}
+            byte if (byte & MASK_SIX_BITS) == ADD_REG_MEM_WITH_REG_OPCODE => {
+                decode_register_memory_to_from_register("ADD", *byte, &mut iterator)
+            }
+            byte if (byte & MASK_SIX_BITS) == ADD_IMM_TO_REG_MEM_OPCODE => {
+                decode_immediate_to_register_memory("ADD", *byte, &mut iterator)
+            }
+            byte if (byte & MASK_SEVEN_BITS) == ADD_IMM_TO_ACC_OPCODE => {
+                decode_memory_to_fro_accumulator("ADD", *byte, &mut iterator, false)
+            }
+            byte if (byte & MASK_SIX_BITS) == SUB_REG_MEM_WITH_REG_OPCODE => {
+                decode_register_memory_to_from_register("SUB", *byte, &mut iterator)
+            }
+            byte if (byte & MASK_SEVEN_BITS) == SUB_IMM_FROM_ACC_OPCODE => {
+                decode_memory_to_fro_accumulator("SUB", *byte, &mut iterator, false)
+            }
+            byte if (byte & MASK_SIX_BITS) == CMP_REG_MEM_AND_REG_OPCODE => {
+                decode_register_memory_to_from_register("CMP", *byte, &mut iterator)
+            }
+            byte if (byte & MASK_SEVEN_BITS) == CMP_IMM_WITH_ACC_OPCODE => {
+                decode_memory_to_fro_accumulator("CMP", *byte, &mut iterator, false)
+            }
+            byte if byte == &JNZ_OPCODE => decode_jump("JNZ", *byte, &mut iterator),
+            byte if byte == &JE_OPCODE => decode_jump("JE", *byte, &mut iterator),
+            byte if byte == &JL_OPCODE => decode_jump("JL", *byte, &mut iterator),
+            byte if byte == &JLE_OPCODE => decode_jump("JLE", *byte, &mut iterator),
+            byte if byte == &JB_OPCODE => decode_jump("JB", *byte, &mut iterator),
+            byte if byte == &JBE_OPCODE => decode_jump("JBE", *byte, &mut iterator),
+            byte if byte == &JP_OPCODE => decode_jump("JP", *byte, &mut iterator),
+            byte if byte == &JO_OPCODE => decode_jump("JO", *byte, &mut iterator),
+            byte if byte == &JS_OPCODE => decode_jump("JS", *byte, &mut iterator),
+            byte if byte == &JNE_OPCODE => decode_jump("JNE", *byte, &mut iterator),
+            byte if byte == &JNL_OPCODE => decode_jump("JNL", *byte, &mut iterator),
+            byte if byte == &JG_OPCODE => decode_jump("JG", *byte, &mut iterator),
+            byte if byte == &JNB_OPCODE => decode_jump("JNB", *byte, &mut iterator),
+            byte if byte == &JA_OPCODE => decode_jump("JA", *byte, &mut iterator),
+            byte if byte == &JNP_OPCODE => decode_jump("JNP", *byte, &mut iterator),
+            byte if byte == &JNO_OPCODE => decode_jump("JNO", *byte, &mut iterator),
+            byte if byte == &JNS_OPCODE => decode_jump("JNS", *byte, &mut iterator),
+            byte if byte == &LOOP_OPCODE => decode_jump("LOOP", *byte, &mut iterator),
+            byte if byte == &LOOPZ_OPCODE => decode_jump("LOOPZ", *byte, &mut iterator),
+            byte if byte == &LOOPNZ_OPCODE => decode_jump("LOOPNZ", *byte, &mut iterator),
+            byte if byte == &JCXZ_OPCODE => decode_jump("JCXZ", *byte, &mut iterator),
+            byte if byte == &PUSH_REG_MEM_OPCODE => {
+                decode_register_memory_to_from_register("PUSH", *byte, &mut iterator)
+            }
+            byte if (byte & MASK_FIVE_BITS) == PUSH_REG_OPCODE => decode_register("PUSH", *byte),
+            byte if (byte & MASK_MIDDLE_TWO_BITS) == PUSH_SEG_REG_OPCODE => {
+                decode_segment_register("PUSH", *byte)
+            }
+            byte if byte == &POP_REG_MEM_OPCODE => {
+                decode_register_memory_to_from_register("POP", *byte, &mut iterator)
+            }
+            byte if (byte & MASK_FIVE_BITS) == POP_REG_OPCODE => decode_register("POP", *byte),
+            byte if (byte & MASK_MIDDLE_TWO_BITS) == POP_SEG_REG_OPCODE => {
+                decode_segment_register("POP", *byte)
+            }
+            byte if (byte & MASK_SEVEN_BITS) == XCHG_REG_MEM_WITH_REG_OPCODE => {
+                decode_register_memory_to_from_register("XCHG", *byte, &mut iterator)
+            }
+            _ => {
+                panic!("No matching decode")
+            }
         }
     }
 }
