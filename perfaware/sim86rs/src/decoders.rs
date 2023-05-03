@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use lazy_static::lazy_static;
-use log::{debug, info, trace, warn, Level, LevelFilter};
+use log::{debug, info};
 
 use crate::readers::{read_next_byte_and_combine, read_next_word};
 

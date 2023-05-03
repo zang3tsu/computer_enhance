@@ -1,11 +1,10 @@
 use std::env;
-use std::fmt::format;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
 
 use env_logger::{Builder, Target};
-use log::{error, info, trace, warn, Level, LevelFilter};
+use log::{error, info, Level, LevelFilter};
 
 mod decoders;
 mod decoding_table;
